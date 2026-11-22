@@ -12,7 +12,40 @@ const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 
 const app = express();
+
 const PORT = Number(process.env.PORT || 3000);
+
+const allowedOrigins = [
+  "https://campuscare-int219.netlify.app"
+];
+
+app.set("trust proxy", 1);
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+
+  if (allowedOrigins.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    res.setHeader("Vary", "Origin");
+  }
+
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET, POST, PUT, DELETE, OPTIONS"
+  );
+
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type"
+  );
+
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+
+  next();
+});
 
 // ================= DATABASE SETUP =================
 
@@ -172,11 +205,11 @@ app.use(
     resave: false,
     saveUninitialized: false,
     cookie: {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-      maxAge: 8 * 60 * 60 * 1000
-    }
+  httpOnly: true,
+  sameSite: "none",
+  secure: true,
+  maxAge: 8 * 60 * 60 * 1000
+}
   })
 );
 
@@ -288,7 +321,12 @@ app.post("/api/auth/logout", auth, (req, res) => {
       });
     }
 
-    res.clearCookie("connect.sid");
+    res.clearCookie("connect.sid", {
+  httpOnly: true,
+  sameSite: "none",
+  secure: true,
+  path: "/"
+});
 
     res.json({
       ok: true
@@ -473,13 +511,7 @@ app.get("/api/health", (req, res) => {
 
 // ================= FRONTEND HOSTING =================
 
-app.use(express.static(__dirname));
 
-app.get("*", (req, res) => {
-  res.sendFile(
-    path.join(__dirname, "index.html")
-  );
-});
 
 // ================= START SERVER =================
 
