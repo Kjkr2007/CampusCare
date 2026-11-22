@@ -1,9 +1,9 @@
 /* =========================================================
    Campus Health Services & Emergency Response — app logic
-   Pure vanilla JS, persisted to localStorage.
+   Pure vanilla JS, persisted through the authenticated CampusCare API.
    ========================================================= */
-
-const STORAGE_KEY = "chs_app_state_v1";
+const API_BASE = "https://campuscare-ztkr.onrender.com";
+const STORAGE_KEY = "chs_app_state_v1"; // retained only for the theme preference migration
 const ESCALATION_MINUTES = 5; // auto-escalate if not acknowledged in time
 
 const TIME_SLOTS = ["09:00","09:30","10:00","10:30","11:00","11:30","12:00",
@@ -22,7 +22,6 @@ function timeNow() {
 /* ---------------- Default seed data ---------------- */
 function seedState() {
   return {
-    accounts: [{id:"usr_admin",name:"Campus Administrator",username:"admin",password:"admin123",role:"admin"}],
     doctors: [
       { id: "doc_1", name: "Dr. Anjali Mehra", specialty: "General Physician", onDuty: true },
       { id: "doc_2", name: "Dr. Rohan Kapoor", specialty: "Orthopedics", onDuty: true },
@@ -43,39 +42,38 @@ function seedState() {
   };
 }
 
+// Never store account credentials or shared app data in browser localStorage.
+// The server is the source of truth; this is only an empty display state until login.
 function loadState() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const loaded = JSON.parse(raw);
-      if (!Array.isArray(loaded.accounts)) loaded.accounts = [{id:"usr_admin",name:"Campus Administrator",username:"admin",password:"admin123",role:"admin"}];
-      return loaded;
-    }
-  } catch (e) { console.warn("Could not load state", e); }
-  const fresh = seedState();
-  saveState(fresh);
-  return fresh;
+  return seedState();
 }
-function saveState(s) {
-  // Persist application data on the backend. Account credentials never travel
-  // inside this state object; they are managed by authenticated API endpoints.
-  const payload = { ...s };
-  delete payload.accounts;
-  fetch("/api/state", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    credentials: "same-origin",
-    body: JSON.stringify(payload)
-  }).then(async r => {
-    if (!r.ok) {
-      const data = await r.json().catch(() => ({}));
-      console.error("Backend save failed:", data.error || r.statusText);
-    }
-  }).catch(err => console.error("Backend connection error:", err));
+let activeAccount = null;
+let state = loadState();
+
+async function apiFetch(path, options = {}) {
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    credentials: "include",
+    headers: { ...(options.headers || {}) }
+  });
+  return response;
 }
 
-let state = loadState();
-delete state.accounts;
+function saveState(s) {
+  if (!activeAccount) return;
+  const payload = { ...s };
+  delete payload.accounts;
+  apiFetch("/api/state", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  }).then(async response => {
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      console.error("Backend save failed:", data.error || response.statusText);
+    }
+  }).catch(error => console.error("Backend connection error:", error));
+}
 
 /* ---------------- Toast ---------------- */
 function toast(msg) {
@@ -526,7 +524,6 @@ function esc(str) {
 
 /* Demo sign-in and administrator account management.
    Plain-text localStorage credentials are NOT production security. */
-let activeAccount = null;
 function applyAccess() {
   const role = activeAccount?.role || "student";
   document.querySelectorAll(".admin-only").forEach(el => el.classList.toggle("role-hidden", role !== "admin"));
@@ -548,13 +545,13 @@ document.getElementById("loginForm").addEventListener("submit", async e => {
   const password = document.getElementById("loginPassword").value;
   const err = document.getElementById("loginError");
   try {
-    const response = await fetch("/api/auth/login", {
+    const response = await apiFetch("/api/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      credentials: "same-origin",
+      credentials: "include",
       body: JSON.stringify({ username, password })
     });
-    const data = await response.json();
+    const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || "Sign in failed");
     await loadServerState();
     signIn(data.user);
@@ -565,7 +562,7 @@ document.getElementById("loginForm").addEventListener("submit", async e => {
   }
 });
 async function loadServerState() {
-  const response = await fetch("/api/state", { credentials: "same-origin" });
+  const response = await apiFetch("/api/state");
   if (!response.ok) throw new Error("Could not load CampusCare data.");
   const serverState = await response.json();
   state = { ...seedState(), ...serverState };
@@ -573,7 +570,7 @@ async function loadServerState() {
   renderAll();
 }
 document.getElementById("logoutBtn").addEventListener("click", async () => {
-  await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" }).catch(() => {});
+  await apiFetch("/api/auth/logout", { method: "POST" }).catch(() => {});
   activeAccount = null;
   document.getElementById("loginScreen").classList.remove("hidden");
   document.getElementById("loginUsername").value = "";
@@ -597,8 +594,8 @@ document.getElementById("createUserForm").addEventListener("submit", async e => 
     specialty: document.getElementById("newSpecialty").value.trim()
   };
   try {
-    const response = await fetch("/api/users", {
-      method: "POST", credentials: "same-origin",
+    const response = await apiFetch("/api/users", {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     });
@@ -618,7 +615,7 @@ async function renderAccounts() {
   const el = document.getElementById("accountList");
   if (!el || activeAccount?.role !== "admin") return;
   try {
-    const response = await fetch("/api/users", { credentials: "same-origin" });
+    const response = await apiFetch("/api/users");
     if (!response.ok) throw new Error("Unable to load accounts");
     const users = await response.json();
     document.getElementById("accountCount").textContent = users.length + " accounts";
@@ -630,8 +627,8 @@ document.getElementById("accountList").addEventListener("click", async e => {
   if (!btn || activeAccount?.role !== "admin") return;
   if (!confirm("Remove this account?")) return;
   try {
-    const response = await fetch("/api/users/" + encodeURIComponent(btn.dataset.id), {
-      method: "DELETE", credentials: "same-origin"
+    const response = await apiFetch("/api/users/" + encodeURIComponent(btn.dataset.id), {
+      method: "DELETE"
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Could not remove account");
@@ -660,7 +657,24 @@ initAvailDate();
 document.getElementById("roleSelect").addEventListener("change", renderAll);
 document.getElementById("userName").addEventListener("input", renderAll);
 
-renderAll();
+// Restore a valid server session on page refresh; otherwise keep the login screen visible.
+(async function initializeApp() {
+  try {
+    const response = await apiFetch("/api/auth/me");
+    if (response.ok) {
+      const data = await response.json();
+      await loadServerState();
+      signIn(data.user);
+      await renderAccounts();
+    } else {
+      document.getElementById("loginScreen").classList.remove("hidden");
+    }
+  } catch (error) {
+    console.error("Could not restore CampusCare session:", error);
+    document.getElementById("loginScreen").classList.remove("hidden");
+  }
+})();
+
 document.getElementById("themeToggle")?.addEventListener("click", () => {
   document.body.classList.toggle("dark-theme");
   const dark = document.body.classList.contains("dark-theme");
@@ -671,4 +685,4 @@ if (localStorage.getItem("campuscare_theme") === "dark") {
   document.body.classList.add("dark-theme");
   document.getElementById("themeToggle").textContent = "☀️ Light mode";
 }
-setInterval(renderAll, 15000); // periodic refresh (escalation checks, live feel)
+setInterval(() => { if (activeAccount) renderAll(); }, 15000); // refresh only during an authenticated session
